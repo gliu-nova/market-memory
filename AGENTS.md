@@ -1,7 +1,7 @@
 # AGENTS.md - Grok Build Instructions
 
 ## Project Overview
-Cloudflare Pages service (TypeScript + D1) that stores historical crypto/market indicator events, answers similarity/count/percentile queries, and returns tweet-ready historical context strings for the `twitter-bot` project. Deploy: GitHub Actions → `wrangler pages deploy`.
+Standalone Python service that stores historical crypto/market indicator events in a local DuckDB file, answers similarity/count/percentile queries, and returns tweet-ready historical context strings for the `twitter-bot` project. Entry point: `run.py`.
 
 ## Context Output Format
 Responses must be structured JSON that `twitter-bot` can weave into scannable tweets. Include: asset, indicator_type, occurrences, percentile, last_seen, tweet_context. Professional, data-driven. Numbers lead; context follows. No Twitter posting from this service.
@@ -63,7 +63,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Use clear variable/function names.
 - Add minimal but helpful comments only where logic is non-obvious.
 - Keep functions small and focused.
-- Prefer modern, clean TypeScript idioms.
+- Prefer modern, clean Python idioms.
 
 ## Final Response Marker
 **Every time you have fully completed the entire user request, end your final response with exactly:**

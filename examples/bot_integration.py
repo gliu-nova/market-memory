@@ -1,21 +1,24 @@
 """
-Enrich twitter-bot draft posts with Market Memory historical context (HTTP).
+Example: enrich a draft tweet with Market Memory historical context.
 
-Set in twitter-bot/.env:
-  MARKET_MEMORY_API_URL=https://market-memory.pages.dev
+Use either the library directly (recommended for twitter-bot) or HTTP calls
+when running market-memory as a sidecar service.
 """
 
 from __future__ import annotations
 
-import os
+from datetime import datetime
 
 import httpx
 
+from market_memory import EventDB
+from market_memory.models import SimilarityQuery
 
-def enrich_tweet_via_http(
+
+def enrich_tweet_with_memory(
     draft: str,
     *,
-    base_url: str | None = None,
+    data_dir: str = "data",
     event_type: str,
     asset: str | None = None,
     indicator_type: str | None = None,
@@ -23,8 +26,36 @@ def enrich_tweet_via_http(
     current_value: float | None = None,
     since: str = "2021-01-01",
 ) -> str:
-    url = base_url or os.environ.get("MARKET_MEMORY_API_URL", "https://market-memory.pages.dev")
-    params: dict[str, str | float] = {
+    """Append tweet-ready historical context to a draft post."""
+    db = EventDB(data_dir=data_dir)
+    try:
+        query = SimilarityQuery(
+            event_type=event_type,
+            asset=asset,
+            indicator_type=indicator_type,
+            direction=direction,
+            since=datetime.fromisoformat(since),
+        )
+        ctx = db.tweet_context(query, current_value=current_value)
+        if ctx.occurrences == 0:
+            return draft
+        return f"{draft}\n\n{ctx.tweet_context}"
+    finally:
+        db.close()
+
+
+def enrich_tweet_via_http(
+    draft: str,
+    *,
+    base_url: str = "http://127.0.0.1:8788",
+    event_type: str,
+    asset: str | None = None,
+    indicator_type: str | None = None,
+    direction: str | None = None,
+    current_value: float | None = None,
+    since: str = "2021-01-01",
+) -> str:
+    params = {
         "event_type": event_type,
         "since": since,
     }
@@ -37,7 +68,7 @@ def enrich_tweet_via_http(
     if current_value is not None:
         params["current_value"] = current_value
 
-    resp = httpx.get(f"{url.rstrip('/')}/tweet-context", params=params, timeout=10.0)
+    resp = httpx.get(f"{base_url}/tweet-context", params=params, timeout=5.0)
     resp.raise_for_status()
     ctx = resp.json()
     if ctx.get("occurrences", 0) == 0:
@@ -45,22 +76,19 @@ def enrich_tweet_via_http(
     return f"{draft}\n\n{ctx['tweet_context']}"
 
 
-def record_event(
-    event: dict,
-    *,
-    base_url: str | None = None,
-    ingest_secret: str | None = None,
-) -> None:
-    """Write a new event back to Market Memory after posting."""
-    url = base_url or os.environ.get("MARKET_MEMORY_API_URL", "https://market-memory.pages.dev")
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    secret = ingest_secret or os.environ.get("MARKET_MEMORY_INGEST_SECRET")
-    if secret:
-        headers["Authorization"] = f"Bearer {secret}"
-
-    httpx.post(
-        f"{url.rstrip('/')}/ingest",
-        json={"events": [event]},
-        headers=headers,
-        timeout=10.0,
-    ).raise_for_status()
+if __name__ == "__main__":
+    draft = (
+        "BTC 24h liquidations spike to $461.8M.\n"
+        "Long-side wipeout after yen carry unwind."
+    )
+    enriched = enrich_tweet_with_memory(
+        draft,
+        data_dir="../data",
+        event_type="market_surge",
+        asset="BTC",
+        indicator_type="liquidations",
+        direction="spike",
+        current_value=461_800_000,
+        since="2021-01-01",
+    )
+    print(enriched)
