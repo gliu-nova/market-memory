@@ -1,0 +1,88 @@
+Create a new project called "market-memory" and make it use the same or almost identical agents.md file as twitter-bot and prediction-market-divergence.
+
+Build a lightweight “Market Memory” service for my Twitter bot.
+This is a lightweight embedded time-series / event database that will help amy Twitter/X bot add historical context to tweets (example: "Similar events since 2021: 12 occurrences").
+
+Build a simple, reliable, file-based event store optimized for storing discrete events with timestamps and metadata. The main value is fast historical queries for context, such as counting or listing similar past events. It should be easy to integrate into my twitter/x
+bot for enriching generated tweets with stats like occurrence counts or recent analogs.
+
+Purpose:
+Store historical crypto/market indicator events and return tweet-ready historical context, e.g.
+“Similar BTC liquidation events since 2021: 12 occurrences.”
+
+
+Use the most practical stack for fast iteration:
+- Python
+- FastAPI
+- DuckDB or SQLite
+- Pandas/Polars only if useful
+- Local-first storage
+
+Core data model:
+Each event should include:
+- unique id
+- timestamp
+- event_type: str (e.g. "fed_announcement", "earnings_beat", "market_surge", "personal_milestone")
+- asset: BTC, ETH, SOL, etc.
+- indicator_type: liquidations, funding, basis, exchange_spread, open_interest, volatility
+- timeframe: 1h, 4h, 24h, 7d
+- value
+- percent_change
+- direction: spike, drop, positive, negative, reset, extreme
+- source
+- tags: list[str] (optional, e.g. ["tech", "bullish"])
+- metadata JSON
+
+Required features:
+1. Ingest events from JSON/CSV with validation.
+2. Store events locally.
+3. Query similar historical events.
+4. Count occurrences since a given date.
+5. Find the last similar event.
+6. Match on event_type + optional tag overlap + time range
+7. Basic stats: total events, breakdown by type, time range covered, monthly/yearly counts.
+8. Calculate percentile/rank of the current value.
+9. Return top historical analogs.
+10. Simple prune/retention: delete events older than X date or keep last N months.
+11. Persistence: Use DuckDB (highly recommended — embedded, single file, excellent SQL for time-series analytics, native Parquet/JSON support, very fast counts/filters). Alternative: Polars + partitioned Parquet files. Choose the cleanest approach and document why.
+12. Return tweet-ready context strings.
+13. Bot integration: In README + examples/, include a concrete helper example showing how the bot can use this to enrich a draft tweet with historical stats (e.g. a function that takes a draft string + context params and returns enriched text).
+14. Library API: Clean, well-documented public interface so the Twitter bot can do from [package] import EventDB; db = EventDB(data_dir=...).
+
+Example queries:
+- Similar BTC liquidation events since 2021
+- BTC liquidation spikes above $400M in 24h
+- SOL funding resets after extreme positive funding
+- ETH basis events in the top 5% since 2021
+
+API endpoints:
+- GET /health
+- POST /ingest
+- GET /events
+- GET /similar
+- GET /count
+- GET /latest
+- GET /percentile
+- GET /tweet-context
+
+Example output:
+{
+  "asset": "BTC",
+  "indicator_type": "liquidations",
+  "current_value": 461800000,
+  "similar_events_since": "2021-01-01",
+  "occurrences": 12,
+  "percentile": 97.4,
+  "last_seen": "2024-08-05",
+  "tweet_context": "Similar BTC liquidation spikes since 2021: 12 occurrences. Current reading ranks in the 97th percentile."
+}
+
+Also include:
+- simple CLI commands for local testing
+- tests for ingestion and query logic
+- README with examples
+- sample data file
+- clear instructions for how my Twitter bot can call this service
+
+Important:
+Do not overengineer this into a full database engine. Build a practical historical-context service that my bot can use immediately.
