@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Market Memory</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Market Memory</h1>
+      <p class="subtitle">Historical market events for tweet context</p>
+    </header>
+
+    <section class="card">
+      <h2>Status</h2>
+      <div id="health" class="muted">Loading…</div>
+    </section>
+
+    <section class="card">
+      <h2>API</h2>
+      <p>Key endpoints for <code>twitter-bot</code>:</p>
+      <ul>
+        <li><code>GET /tweet-context</code> — tweet-ready historical stats</li>
+        <li><code>POST /ingest</code> — store new events</li>
+        <li><code>GET /similar</code> · <code>/count</code> · <code>/latest</code></li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <h2>Recent events</h2>
+        <button id="refresh">Refresh</button>
+      </div>
+      <div id="events" class="muted">Loading…</div>
+    </section>
+  </main>
+  <script>
+    async function loadHealth() {
+      const data = await fetch('/health').then((r) => r.json());
+      document.getElementById('health').innerHTML = `
+        <div><strong>Status:</strong> ${data.status}</div>
+        <div><strong>Runtime:</strong> ${data.runtime}</div>
+        <div><strong>Total events:</strong> ${data.total_events}</div>
+        <div><strong>Range:</strong> ${data.earliest || '—'} → ${data.latest || '—'}</div>
+      `;
+    }
+    async function loadEvents() {
+      const data = await fetch('/events?limit=8').then((r) => r.json());
+      const el = document.getElementById('events');
+      if (!data.events?.length) {
+        el.textContent = 'No events yet. POST /ingest to seed data.';
+        return;
+      }
+      el.innerHTML = data.events.map((e) => `
+        <div style="margin-bottom:0.75rem">
+          <strong>${e.timestamp?.slice(0, 10)}</strong>
+          ${[e.asset, e.indicator_type, e.direction].filter(Boolean).join(' · ')}
+          ${e.value != null ? ` — ${e.value}` : ''}
+        </div>
+      `).join('');
+    }
+    document.getElementById('refresh').onclick = () => { loadHealth(); loadEvents(); };
+    loadHealth();
+    loadEvents();
+  </script>
+</body>
+</html>
