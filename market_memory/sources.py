@@ -1,0 +1,485 @@
+from __future__ import annotations
+
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+
+OKX_BASE = "https://www.okx.com/api/v5"
+HL_INFO = "https://api.hyperliquid.xyz/info"
+COINGLASS_BASE = "https://open-api-v4.coinglass.com"
+COINALYZE_BASE = "https://api.coinalyze.net/v1"
+FRED_BASE = "https://api.stlouisfed.org/fred"
+
+ASSET_OKX: dict[str, dict[str, str]] = {
+    "BTC": {"swap": "BTC-USDT-SWAP", "index": "BTC-USDT", "uly": "BTC-USDT"},
+    "ETH": {"swap": "ETH-USDT-SWAP", "index": "ETH-USDT", "uly": "ETH-USDT"},
+    "SOL": {"swap": "SOL-USDT-SWAP", "index": "SOL-USDT", "uly": "SOL-USDT"},
+}
+
+ASSET_HL = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL"}
+
+ASSET_COINGLASS_PAIR = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+ASSET_BINANCE = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"}
+BINANCE_FAPI = "https://fapi.binance.com"
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+def _request_with_retry(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    last: httpx.Response | None = None
+    for attempt in range(8):
+        resp = client.request(method, url, timeout=60.0, **kwargs)
+        last = resp
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
+        time.sleep(min(2 ** attempt, 30))
+    if last is not None:
+        last.raise_for_status()
+    raise RuntimeError(f"request failed for {url}")
+
+
+def _get_json(client: httpx.Client, url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
+    return _request_with_retry(client, "GET", url, params=params, headers=headers).json()
+
+
+def _post_json(client: httpx.Client, url: str, payload: dict[str, Any]) -> Any:
+    return _request_with_retry(client, "POST", url, json=payload).json()
+
+
+def fetch_okx_funding_history(client: httpx.Client, asset: str, *, since_ms: int) -> list[dict[str, Any]]:
+    inst = ASSET_OKX[asset]["swap"]
+    rows: list[dict[str, Any]] = []
+    after: int | None = None
+    for _ in range(500):
+        params: dict[str, Any] = {"instId": inst, "limit": 100}
+        if after is not None:
+            params["after"] = str(after)
+        body = _get_json(client, f"{OKX_BASE}/public/funding-rate-history", params=params)
+        if body.get("code") != "0":
+            raise RuntimeError(f"OKX funding error: {body}")
+        batch = body.get("data") or []
+        if not batch:
+            break
+        oldest = min(int(row["fundingTime"]) for row in batch)
+        for row in batch:
+            ts = int(row["fundingTime"])
+            if ts >= since_ms:
+                rows.append({"time": ts, "rate": float(row["fundingRate"])})
+        if oldest <= since_ms:
+            break
+        if oldest == after:
+            break
+        after = oldest
+        if len(batch) < 100:
+            break
+        time.sleep(0.2)
+    return sorted(rows, key=lambda r: r["time"])
+
+
+def fetch_hl_funding_history(client: httpx.Client, asset: str, *, since_ms: int) -> list[dict[str, Any]]:
+    coin = ASSET_HL[asset]
+    rows: list[dict[str, Any]] = []
+    start = since_ms
+    for _ in range(300):
+        payload = {"type": "fundingHistory", "coin": coin, "startTime": start}
+        batch = _post_json(client, HL_INFO, payload)
+        if not batch:
+            break
+        for row in batch:
+            ts = int(row["time"])
+            rows.append(
+                {
+                    "time": ts,
+                    "rate": float(row["fundingRate"]),
+                    "premium": float(row.get("premium") or 0.0),
+                }
+            )
+        if len(batch) < 500:
+            break
+        start = int(batch[-1]["time"]) + 1
+        time.sleep(0.35)
+    dedup = {r["time"]: r for r in rows if r["time"] >= since_ms}
+    return sorted(dedup.values(), key=lambda r: r["time"])
+
+
+def _paginate_okx_candles(
+    client: httpx.Client,
+    endpoint: str,
+    inst_id: str,
+    *,
+    since_ms: int,
+    bar: str = "1D",
+) -> list[list[str]]:
+    rows: list[list[str]] = []
+    after: str | None = None
+    for _ in range(300):
+        params: dict[str, Any] = {"instId": inst_id, "bar": bar, "limit": 100}
+        if after:
+            params["after"] = after
+        body = _get_json(client, f"{OKX_BASE}/market/{endpoint}", params=params)
+        if body.get("code") != "0":
+            raise RuntimeError(f"OKX candles error: {body}")
+        batch = body.get("data") or []
+        if not batch:
+            break
+        stop = False
+        for candle in batch:
+            ts = int(candle[0])
+            if ts < since_ms:
+                stop = True
+                break
+            rows.append(candle)
+        if stop or len(batch) < 100:
+            break
+        after = batch[-1][0]
+        time.sleep(0.2)
+    return sorted(rows, key=lambda c: int(c[0]))
+
+
+def fetch_okx_daily_basis(client: httpx.Client, asset: str, *, since_ms: int) -> list[dict[str, Any]]:
+    swap = ASSET_OKX[asset]["swap"]
+    index = ASSET_OKX[asset]["index"]
+    marks = {int(c[0]): float(c[4]) for c in _paginate_okx_candles(client, "history-mark-price-candles", swap, since_ms=since_ms)}
+    indices = {int(c[0]): float(c[4]) for c in _paginate_okx_candles(client, "history-index-candles", index, since_ms=since_ms)}
+    rows: list[dict[str, Any]] = []
+    for ts, mark in marks.items():
+        idx = indices.get(ts)
+        if not idx or idx == 0:
+            continue
+        rows.append({"time": ts, "basis_bps": (mark - idx) / idx * 10000})
+    return rows
+
+
+def fetch_hl_daily_basis(client: httpx.Client, asset: str, *, since_ms: int) -> list[dict[str, Any]]:
+    """Daily perp premium (basis proxy) from Hyperliquid funding history."""
+    funding = fetch_hl_funding_history(client, asset, since_ms=since_ms)
+    by_day: dict[str, list[float]] = {}
+    for row in funding:
+        day = datetime.fromtimestamp(row["time"] / 1000, tz=timezone.utc).date().isoformat()
+        by_day.setdefault(day, []).append(float(row.get("premium") or 0.0) * 10000)
+    rows: list[dict[str, Any]] = []
+    for day, premiums in sorted(by_day.items()):
+        ts = int(datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        rows.append({"time": ts, "basis_bps": max(premiums, key=abs)})
+    return rows
+
+
+def fetch_coinglass_hourly_liquidations(
+    client: httpx.Client,
+    asset: str,
+    *,
+    api_key: str,
+    exchange_scope: str,
+    since_ms: int,
+) -> list[dict[str, Any]]:
+    symbol = asset
+    pair = ASSET_COINGLASS_PAIR[asset]
+    headers = {"CG-API-KEY": api_key, "accept": "application/json"}
+    rows: list[dict[str, Any]] = []
+    end_ms = _ms(datetime.now(timezone.utc))
+    cursor_end = end_ms
+    for _ in range(50):
+        params = {
+            "symbol": symbol,
+            "interval": "1h",
+            "limit": 1000,
+            "end_time": cursor_end,
+        }
+        if exchange_scope == "okx":
+            url = f"{COINGLASS_BASE}/api/futures/liquidation/history"
+            params["exchange"] = "OKX"
+            params["symbol"] = pair
+        else:
+            url = f"{COINGLASS_BASE}/api/futures/liquidation/aggregated-history"
+            params["exchange_list"] = "Binance,OKX,Bybit"
+        body = _get_json(client, url, params=params, headers=headers)
+        if str(body.get("code")) != "0":
+            raise RuntimeError(f"Coinglass error ({exchange_scope}): {body.get('msg', body)}")
+        batch = body.get("data") or []
+        if not batch:
+            break
+        oldest = None
+        for row in batch:
+            ts = int(row["time"])
+            oldest = ts if oldest is None else min(oldest, ts)
+            if ts < since_ms:
+                continue
+            if exchange_scope == "okx":
+                total = float(row.get("longLiquidationUsd") or row.get("long_liquidation_usd") or 0) + float(
+                    row.get("shortLiquidationUsd") or row.get("short_liquidation_usd") or 0
+                )
+            else:
+                total = float(row.get("aggregated_long_liquidation_usd") or 0) + float(
+                    row.get("aggregated_short_liquidation_usd") or 0
+                )
+            rows.append({"time": ts, "total_usd": total})
+        if oldest is None or oldest <= since_ms or len(batch) < 1000:
+            break
+        cursor_end = oldest - 1
+        time.sleep(0.25)
+    dedup = {r["time"]: r for r in rows}
+    return sorted(dedup.values(), key=lambda r: r["time"])
+
+
+def fetch_fred_fed_funds_changes(client: httpx.Client, api_key: str, *, since: str = "2021-01-01") -> list[dict[str, Any]]:
+    params = {
+        "series_id": "DFF",
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": since,
+        "sort_order": "asc",
+    }
+    body = _get_json(client, f"{FRED_BASE}/series/observations", params=params)
+    obs = body.get("observations") or []
+    rows: list[dict[str, Any]] = []
+    prev: float | None = None
+    for item in obs:
+        raw = item.get("value")
+        if raw in (None, ".", ""):
+            continue
+        val = float(raw)
+        if prev is not None and abs(val - prev) > 1e-9:
+            rows.append(
+                {
+                    "date": item["date"],
+                    "value": val,
+                    "prev": prev,
+                    "change_bps": (val - prev) * 100,
+                }
+            )
+        prev = val
+    return rows
+
+
+def load_coinalyze_api_key() -> str | None:
+    key = os.environ.get("COINALYZE_API_KEY", "").strip()
+    if key:
+        return key
+    for path in (
+        os.environ.get("TWITTER_BOT_ENV"),
+        os.path.expanduser("~/projects/twitter-bot/.env"),
+        os.path.join(os.getcwd(), ".env"),
+    ):
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("COINALYZE_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        return val
+    return None
+
+
+_coinalyze_markets_cache: list[dict[str, Any]] | None = None
+
+
+def _coinalyze_headers(api_key: str) -> dict[str, str]:
+    return {"api_key": api_key}
+
+
+def fetch_coinalyze_future_markets(client: httpx.Client, api_key: str) -> list[dict[str, Any]]:
+    global _coinalyze_markets_cache
+    if _coinalyze_markets_cache is not None:
+        return _coinalyze_markets_cache
+    body = _get_json(client, f"{COINALYZE_BASE}/future-markets", headers=_coinalyze_headers(api_key))
+    if not isinstance(body, list):
+        raise RuntimeError(f"Coinalyze future-markets error: {body}")
+    _coinalyze_markets_cache = body
+    return body
+
+
+def resolve_coinalyze_okx_symbol(client: httpx.Client, api_key: str, asset: str) -> str | None:
+    """Find Coinalyze perpetual symbol for asset on OKX (exchange code O)."""
+    markets = fetch_coinalyze_future_markets(client, api_key)
+    candidates = [
+        m
+        for m in markets
+        if m.get("base_asset") == asset
+        and m.get("is_perpetual")
+        and m.get("exchange") == "O"
+        and m.get("quote_asset") in ("USDT", "USD")
+    ]
+    if not candidates:
+        return None
+    usdt = [m for m in candidates if m.get("quote_asset") == "USDT"]
+    pick = usdt[0] if usdt else candidates[0]
+    return str(pick["symbol"])
+
+
+def fetch_coinalyze_liquidation_hourly_buckets(
+    client: httpx.Client,
+    asset: str,
+    *,
+    api_key: str,
+    since_sec: int,
+    to_sec: int,
+) -> list[dict[str, Any]] | None:
+    """Hourly OKX liquidation buckets from Coinalyze (USD). Returns None if symbol missing."""
+    symbol = resolve_coinalyze_okx_symbol(client, api_key, asset)
+    if not symbol:
+        return None
+    rows: list[dict[str, Any]] = []
+    chunk_seconds = 7 * 24 * 3600
+    cursor = since_sec
+    while cursor < to_sec:
+        chunk_to = min(to_sec, cursor + chunk_seconds)
+        body = _get_json(
+            client,
+            f"{COINALYZE_BASE}/liquidation-history",
+            params={
+                "symbols": symbol,
+                "interval": "1hour",
+                "from": cursor,
+                "to": chunk_to,
+                "convert_to_usd": "true",
+            },
+            headers=_coinalyze_headers(api_key),
+        )
+        if not isinstance(body, list) or not body:
+            cursor = chunk_to + 1
+            time.sleep(1.5)
+            continue
+        history = body[0].get("history") or []
+        for point in history:
+            ts = int(point["t"])
+            long_usd = float(point.get("l") or 0)
+            short_usd = float(point.get("s") or 0)
+            rows.append(
+                {
+                    "time": ts * 1000,
+                    "total_usd": long_usd + short_usd,
+                    "long_usd": long_usd,
+                    "short_usd": short_usd,
+                    "symbol": symbol,
+                }
+            )
+        cursor = chunk_to + 1
+        time.sleep(1.5)
+    dedup = {r["time"]: r for r in rows if r["time"] >= since_sec * 1000}
+    return sorted(dedup.values(), key=lambda r: r["time"])
+
+
+def load_coinglass_api_key() -> str | None:
+    key = os.environ.get("COINGLASS_API_KEY", "").strip()
+    if key:
+        return key
+    for path in (
+        os.environ.get("TWITTER_BOT_ENV"),
+        os.path.expanduser("~/projects/twitter-bot/.env"),
+        os.path.join(os.getcwd(), ".env"),
+    ):
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("COINGLASS_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        return val
+    return None
+
+
+def _hour_start_ms(ts_ms: int) -> int:
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return _ms(dt)
+
+
+def _liq_fill_usd(size: float, price: float) -> float:
+    return float(size) * float(price)
+
+
+def fetch_okx_liquidation_hourly_buckets(client: httpx.Client, asset: str) -> list[dict[str, Any]]:
+    """Aggregate recent OKX liquidation fills into UTC hourly buckets."""
+    uly = ASSET_OKX[asset]["uly"]
+    body = _get_json(
+        client,
+        f"{OKX_BASE}/public/liquidation-orders",
+        params={"instType": "SWAP", "uly": uly, "state": "filled", "limit": 100},
+    )
+    if body.get("code") != "0":
+        raise RuntimeError(f"OKX liquidations error: {body}")
+    buckets: dict[int, dict[str, float]] = {}
+    for block in body.get("data", []):
+        for detail in block.get("details", []):
+            ts = int(detail.get("time") or detail.get("ts") or 0)
+            if not ts:
+                continue
+            hour = _hour_start_ms(ts)
+            usd = _liq_fill_usd(detail["sz"], detail["bkPx"])
+            bucket = buckets.setdefault(hour, {"total_usd": 0.0, "long_usd": 0.0, "short_usd": 0.0})
+            bucket["total_usd"] += usd
+            pos = (detail.get("posSide") or "").lower()
+            if pos == "long" or (detail.get("side") or "").lower() == "sell":
+                bucket["long_usd"] += usd
+            elif pos == "short" or (detail.get("side") or "").lower() == "buy":
+                bucket["short_usd"] += usd
+            else:
+                bucket["long_usd"] += usd
+    return [{"time": hour, **vals} for hour, vals in sorted(buckets.items())]
+
+
+def fetch_binance_liquidation_hourly_buckets(
+    client: httpx.Client,
+    asset: str,
+    *,
+    lookback_hours: int = 24,
+) -> list[dict[str, Any]] | None:
+    """Optional Binance liquidation buckets; returns None when geo-blocked or unavailable."""
+    symbol = ASSET_BINANCE[asset]
+    try:
+        body = _get_json(
+            client,
+            f"{BINANCE_FAPI}/fapi/v1/allForceOrders",
+            params={"symbol": symbol, "limit": 100},
+        )
+    except httpx.HTTPError:
+        return None
+    if isinstance(body, dict) and body.get("code") not in (None, 0):
+        return None
+    if not isinstance(body, list):
+        return None
+    cutoff = _ms(datetime.now(timezone.utc)) - lookback_hours * 3600 * 1000
+    buckets: dict[int, dict[str, float]] = {}
+    for row in body:
+        ts = int(row.get("time") or 0)
+        if ts < cutoff:
+            continue
+        hour = _hour_start_ms(ts)
+        px = float(row.get("price") or row.get("avgPrice") or 0)
+        qty = float(row.get("origQty") or row.get("executedQty") or 0)
+        usd = px * qty
+        bucket = buckets.setdefault(hour, {"total_usd": 0.0, "long_usd": 0.0, "short_usd": 0.0})
+        bucket["total_usd"] += usd
+        side = (row.get("side") or "").upper()
+        if side == "SELL":
+            bucket["long_usd"] += usd
+        else:
+            bucket["short_usd"] += usd
+    return [{"time": hour, **vals} for hour, vals in sorted(buckets.items())]
+
+
+def load_fred_api_key() -> str | None:
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    if key:
+        return key
+    for path in (
+        os.environ.get("TWITTER_BOT_ENV"),
+        os.path.expanduser("~/projects/twitter-bot/.env"),
+        os.path.join(os.getcwd(), ".env"),
+    ):
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("FRED_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        return val
+    return None

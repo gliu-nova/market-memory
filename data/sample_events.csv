@@ -1,4 +1,1 @@
 id,timestamp,event_type,asset,indicator_type,timeframe,value,percent_change,direction,source,tags,metadata
-btc-liq-2021-05-19,2021-05-19T14:00:00Z,market_surge,BTC,liquidations,24h,520000000,180.0,spike,coinglass,"[""crypto"", ""bearish""]","{""long_share"": 0.82}"
-btc-liq-2024-08-05,2024-08-05T06:00:00Z,market_surge,BTC,liquidations,24h,461800000,115.0,spike,coinglass,"[""crypto"", ""yen-carry""]",{}
-sol-funding-reset-2024-03-16,2024-03-16T08:00:00Z,market_surge,SOL,funding,8h,0.0001,-94.0,reset,binance,"[""crypto""]",{}

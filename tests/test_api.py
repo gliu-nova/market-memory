@@ -11,7 +11,7 @@ from market_memory.db import EventDB
 
 def _client(tmp_path) -> TestClient:
     cfg = AppConfig(service=ServiceConfig(data_dir=str(tmp_path)))
-    sample = Path(__file__).resolve().parents[1] / "data" / "sample_events.json"
+    sample = Path(__file__).resolve().parent / "fixtures" / "sample_events.json"
     db = EventDB(data_dir=tmp_path)
     db.ingest_file(sample)
     db.close()

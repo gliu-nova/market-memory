@@ -18,4 +18,4 @@ def temp_db() -> EventDB:
 
 @pytest.fixture
 def sample_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "data" / "sample_events.json"
+    return Path(__file__).resolve().parent / "fixtures" / "sample_events.json"

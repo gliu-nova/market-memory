@@ -47,8 +47,47 @@ def main() -> None:
     prune.add_argument("--before", help="Delete events before ISO date")
     prune.add_argument("--keep-months", type=int, help="Keep only last N months")
 
+    backfill = sub.add_parser("backfill", help="Full backfill (default: replace all events)")
+    backfill.add_argument("--since", default="2021-01-01", help="ISO date lower bound")
+    backfill.add_argument("--no-wipe", action="store_true", help="Append instead of replacing all events")
+
+    sync = sub.add_parser("sync", help="Incremental sync from free exchange APIs (for cron/poll)")
+    sync.add_argument("--since", default="2021-01-01", help="ISO date lower bound for first run")
+    sync.add_argument("--interval-minutes", type=int, default=0, help="Skip if last sync within N minutes")
+    sync.add_argument("--force", action="store_true", help="Run even if interval not elapsed")
+    sync.add_argument(
+        "--seed-verified-liquidations",
+        action="store_true",
+        help="One-time: add major historical liquidation episodes if DB has none",
+    )
+
     args = parser.parse_args()
     cfg = load_config(data_dir=args.data_dir)
+
+    if args.command == "backfill":
+        from market_memory.backfill import backfill_database
+
+        report = backfill_database(
+            data_dir=cfg.service.data_dir,
+            since=datetime.fromisoformat(args.since),
+            wipe=not args.no_wipe,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "sync":
+        from market_memory.sync import sync_database
+
+        report = sync_database(
+            data_dir=cfg.service.data_dir,
+            since=datetime.fromisoformat(args.since),
+            interval_minutes=args.interval_minutes,
+            force=args.force,
+            seed_verified_liquidations=args.seed_verified_liquidations,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
     db = EventDB(data_dir=cfg.service.data_dir)
 
     try:

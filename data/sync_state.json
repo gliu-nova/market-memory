@@ -1,0 +1,59 @@
+{
+  "last_sync_at": "2026-06-25T11:26:34.352914+00:00",
+  "last_report": {
+    "mode": "incremental",
+    "since": "2021-01-01",
+    "sources": {
+      "BTC_funding": {
+        "events": 8,
+        "since": "2026-06-18"
+      },
+      "BTC_basis": {
+        "events": 0,
+        "since": "2026-06-17"
+      },
+      "ETH_funding": {
+        "events": 8,
+        "since": "2026-06-18"
+      },
+      "ETH_basis": {
+        "events": 0,
+        "since": "2026-06-17"
+      },
+      "SOL_funding": {
+        "events": 8,
+        "since": "2026-06-18"
+      },
+      "SOL_basis": {
+        "events": 0,
+        "since": "2026-06-16"
+      },
+      "liquidations_mode": "coinalyze+okx",
+      "liquidations_events": 22,
+      "BTC_liquidations": {
+        "okx_hours": 16,
+        "coinalyze_hours": 0,
+        "events": 8
+      },
+      "ETH_liquidations": {
+        "okx_hours": 18,
+        "coinalyze_hours": 0,
+        "events": 9
+      },
+      "SOL_liquidations": {
+        "okx_hours": 24,
+        "coinalyze_hours": 0,
+        "events": 5
+      },
+      "fed_funds": {
+        "events": 1
+      }
+    },
+    "warnings": [
+      "Binance liquidation API unavailable from this network \u2014 using OKX hourly buckets only. History builds forward from each sync (OKX exposes ~14h of fills per poll)."
+    ],
+    "total_events": 47,
+    "ingested": 47,
+    "skipped": false
+  }
+}
