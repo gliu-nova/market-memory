@@ -83,12 +83,11 @@ def _concise_tweet_line(
     if occurrences >= 8 and since_year:
         return f"{occurrences} similar {subject} since {since_year}."
     if occurrences >= 3 and last_seen is not None:
-        return f"Largest similar {subject} since {last_seen.strftime('%b %Y')}."
+        return f"Biggest similar {subject} since {last_seen.strftime('%b %Y')}."
     if occurrences >= 3 and since_year:
         return f"{occurrences} similar {subject} since {since_year}."
 
-    suffix = "occurrences" if occurrences != 1 else "occurrence"
-    return f"{occurrences} similar {suffix} on record."
+    return f"Rare {subject} vs recent history."
 
 
 def build_tweet_context(
