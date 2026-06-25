@@ -11,16 +11,9 @@ from market_memory.sources import (
     ASSET_OKX,
     fetch_binance_liquidation_hourly_buckets,
     fetch_coinalyze_liquidation_hourly_buckets,
-    fetch_coinglass_hourly_liquidations,
-    fetch_fred_fed_funds_changes,
-    fetch_hl_daily_basis,
-    fetch_hl_funding_history,
-    fetch_okx_daily_basis,
-    fetch_okx_funding_history,
     fetch_okx_liquidation_hourly_buckets,
     load_coinalyze_api_key,
     load_coinglass_api_key,
-    load_fred_api_key,
 )
 
 
@@ -524,107 +517,27 @@ def verified_liquidation_fallback_events(
     return events
 
 
-def detect_fed_events(rows: list[dict[str, Any]]) -> list[EventCreate]:
-    events: list[EventCreate] = []
-    for row in rows:
-        change = row["change_bps"]
-        direction = "drop" if change < 0 else "positive"
-        events.append(
-            EventCreate(
-                id=f"fed-funds-{row['date']}",
-                timestamp=datetime.fromisoformat(f"{row['date']}T18:00:00+00:00"),
-                event_type="fed_announcement",
-                value=row["value"],
-                percent_change=change,
-                direction=direction,
-                source="fred",
-                tags=["macro"],
-                metadata={"prev_value": row["prev"], "verified_sources": ["fred"]},
-            )
-        )
-    return events
-
-
 def collect_real_events(*, since: datetime | None = None) -> tuple[list[EventCreate], dict[str, Any]]:
-    since = since or SINCE_DEFAULT
-    since_ms = int(since.timestamp() * 1000)
-    report: dict[str, Any] = {"since": since.date().isoformat(), "sources": {}, "warnings": []}
-    events: list[EventCreate] = []
+    from market_memory.collect import collect_all_events
 
-    with httpx.Client() as client:
-        for asset in ("BTC", "ETH", "SOL"):
-            okx_funding = fetch_okx_funding_history(client, asset, since_ms=since_ms)
-            hl_funding = fetch_hl_funding_history(client, asset, since_ms=since_ms)
-            funding_events = detect_funding_events(asset, okx_funding, hl_funding)
-            events.extend(funding_events)
-            report["sources"][f"{asset}_funding"] = {
-                "okx_points": len(okx_funding),
-                "hl_points": len(hl_funding),
-                "events": len(funding_events),
-            }
-
-            okx_basis = fetch_okx_daily_basis(client, asset, since_ms=since_ms)
-            hl_basis = fetch_hl_daily_basis(client, asset, since_ms=since_ms)
-            basis_events = detect_basis_events(asset, okx_basis, hl_basis)
-            events.extend(basis_events)
-            report["sources"][f"{asset}_basis"] = {
-                "okx_points": len(okx_basis),
-                "hl_points": len(hl_basis),
-                "events": len(basis_events),
-            }
-
-        cg_key = load_coinglass_api_key()
-        if cg_key:
-            liq_events: list[EventCreate] = []
-            for asset in ("BTC", "ETH", "SOL"):
-                agg = fetch_coinglass_hourly_liquidations(client, asset, api_key=cg_key, exchange_scope="aggregated", since_ms=since_ms)
-                okx_only = fetch_coinglass_hourly_liquidations(client, asset, api_key=cg_key, exchange_scope="okx", since_ms=since_ms)
-                asset_events = detect_liquidation_events_from_coinglass(asset, agg, okx_only)
-                liq_events.extend(asset_events)
-                report["sources"][f"{asset}_liquidations"] = {
-                    "coinglass_agg_hours": len(agg),
-                    "coinglass_okx_hours": len(okx_only),
-                    "events": len(asset_events),
-                }
-            events.extend(liq_events)
-            report["sources"]["liquidations_mode"] = "coinglass_dual"
-        else:
-            cz_key = load_coinalyze_api_key()
-            liq_events, liq_meta = collect_liquidation_events(
-                client,
-                since=since,
-                coinalyze_key=cz_key,
-                include_verified_episodes=True,
+    events, report = collect_all_events(
+        since=since,
+        include_verified_liquidations=True,
+        include_exchange_spreads=False,
+    )
+    cz_key = load_coinalyze_api_key()
+    if not load_coinglass_api_key():
+        if cz_key:
+            report.setdefault("warnings", []).append(
+                "Liquidations: price-verified major episodes plus Coinalyze/OKX/Binance cross-check. "
+                "Run `python -m market_memory.cli sync` on a schedule to keep hourly data current."
             )
-            events.extend(liq_events)
-            mode = liq_meta.get("mode", "okx")
-            report["sources"]["liquidations_mode"] = f"verified_episodes+{mode}"
-            report["sources"]["liquidations_events"] = len(liq_events)
-            for asset in ("BTC", "ETH", "SOL"):
-                if asset in liq_meta:
-                    report["sources"][f"{asset}_liquidations"] = liq_meta[asset]
-            if cz_key:
-                report["warnings"].append(
-                    "Liquidations: price-verified major episodes plus Coinalyze/OKX/Binance cross-check. "
-                    "Run `python -m market_memory.cli sync` on a schedule to keep hourly data current."
-                )
-            else:
-                report["warnings"].append(
-                    "Liquidations: major historical episodes (price-verified) plus OKX hourly buckets. "
-                    "Add COINALYZE_API_KEY for fuller hourly history. "
-                    "Run `python -m market_memory.cli sync` on a schedule to accumulate forward-looking data."
-                )
-
-        fred_key = load_fred_api_key()
-        if fred_key:
-            fed_rows = fetch_fred_fed_funds_changes(client, fred_key, since=since.date().isoformat())
-            fed_events = detect_fed_events(fed_rows)
-            events.extend(fed_events)
-            report["sources"]["fed_funds"] = {"changes": len(fed_rows), "events": len(fed_events)}
         else:
-            report["warnings"].append("No FRED_API_KEY — skipped fed funds events.")
-
-    report["total_events"] = len(events)
+            report.setdefault("warnings", []).append(
+                "Liquidations: major historical episodes (price-verified) plus OKX hourly buckets. "
+                "Add COINALYZE_API_KEY for fuller hourly history. "
+                "Run `python -m market_memory.cli sync` on a schedule to accumulate forward-looking data."
+            )
     return events, report
 
 

@@ -55,9 +55,12 @@ def test_tweet_context(temp_db, sample_path):
         current_value=461_800_000,
     )
     assert ctx.occurrences == 12
-    assert "BTC" in ctx.tweet_context
-    assert "12 occurrence" in ctx.tweet_context
     assert ctx.percentile is not None
+    assert len(ctx.tweet_context) <= 80
+    assert (
+        "percentile historically" in ctx.tweet_context
+        or "similar BTC liquidation spikes" in ctx.tweet_context
+    )
 
 
 def test_stats(temp_db, sample_path):

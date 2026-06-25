@@ -12,6 +12,16 @@ HL_INFO = "https://api.hyperliquid.xyz/info"
 COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 COINALYZE_BASE = "https://api.coinalyze.net/v1"
 FRED_BASE = "https://api.stlouisfed.org/fred"
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+FEAR_GREED_BASE = "https://api.alternative.me/fng"
+KRAKEN_BASE = "https://api.kraken.com/0/public/Ticker"
+COINBASE_BASE = "https://api.coinbase.com/v2/prices"
+
+EXCHANGE_SPREAD_ASSETS: dict[str, dict[str, str]] = {
+    "BTC": {"kraken": "XBTUSD", "coinbase": "BTC-USD"},
+    "ETH": {"kraken": "ETHUSD", "coinbase": "ETH-USD"},
+    "SOL": {"kraken": "SOLUSD", "coinbase": "SOL-USD"},
+}
 
 ASSET_OKX: dict[str, dict[str, str]] = {
     "BTC": {"swap": "BTC-USDT-SWAP", "index": "BTC-USDT", "uly": "BTC-USDT"},
@@ -44,8 +54,17 @@ def _request_with_retry(client: httpx.Client, method: str, url: str, **kwargs: A
     raise RuntimeError(f"request failed for {url}")
 
 
-def _get_json(client: httpx.Client, url: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
-    return _request_with_retry(client, "GET", url, params=params, headers=headers).json()
+def _get_json(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    merged = {"User-Agent": "market-memory/0.1"}
+    if headers:
+        merged.update(headers)
+    return _request_with_retry(client, "GET", url, params=params, headers=merged).json()
 
 
 def _post_json(client: httpx.Client, url: str, payload: dict[str, Any]) -> Any:
@@ -225,6 +244,125 @@ def fetch_coinglass_hourly_liquidations(
         time.sleep(0.25)
     dedup = {r["time"]: r for r in rows}
     return sorted(dedup.values(), key=lambda r: r["time"])
+
+
+def fetch_yahoo_daily_history(
+    client: httpx.Client,
+    symbol: str,
+    *,
+    since: datetime,
+) -> list[tuple[str, float]]:
+    """Daily (date, close) rows from Yahoo Finance chart API."""
+    period1 = int(since.timestamp())
+    period2 = int(datetime.now(timezone.utc).timestamp())
+    body = _get_json(
+        client,
+        f"{YAHOO_CHART_BASE}/{symbol}",
+        params={"period1": period1, "period2": period2, "interval": "1d"},
+        headers={"User-Agent": "market-memory/0.1"},
+    )
+    result = (body.get("chart") or {}).get("result") or []
+    if not result:
+        return []
+    timestamps = result[0].get("timestamp") or []
+    closes = (result[0].get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+    rows: list[tuple[str, float]] = []
+    for ts, close in zip(timestamps, closes):
+        if ts is None or close is None:
+            continue
+        day = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+        rows.append((day, float(close)))
+    return rows
+
+
+def fetch_fred_series(
+    client: httpx.Client,
+    api_key: str,
+    series_id: str,
+    *,
+    since: str = "2021-01-01",
+) -> list[tuple[str, float]]:
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": since,
+        "sort_order": "asc",
+    }
+    body = _get_json(client, f"{FRED_BASE}/series/observations", params=params)
+    rows: list[tuple[str, float]] = []
+    for item in body.get("observations") or []:
+        raw = item.get("value")
+        if raw in (None, ".", ""):
+            continue
+        rows.append((item["date"], float(raw)))
+    return rows
+
+
+def fetch_fred_cpi_yoy_series(
+    client: httpx.Client,
+    api_key: str,
+    series_id: str,
+    *,
+    since: str = "2021-01-01",
+) -> list[tuple[str, float]]:
+    raw = fetch_fred_series(client, api_key, series_id, since=since)
+    out: list[tuple[str, float]] = []
+    for i, (day, val) in enumerate(raw):
+        if i < 12:
+            continue
+        prev = raw[i - 12][1]
+        if prev == 0:
+            continue
+        yoy = ((val / prev) - 1) * 100
+        out.append((day, yoy))
+    return out
+
+
+def fetch_fear_greed_history(
+    client: httpx.Client,
+    *,
+    since: datetime,
+) -> list[tuple[str, float]]:
+    since_ts = int(since.timestamp())
+    body = _get_json(client, f"{FEAR_GREED_BASE}/", params={"limit": 0})
+    rows: list[tuple[str, float]] = []
+    for entry in body.get("data") or []:
+        ts = entry.get("timestamp")
+        if not ts:
+            continue
+        if int(ts) < since_ts:
+            continue
+        day = datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+        rows.append((day, float(entry["value"])))
+    return sorted(rows, key=lambda r: r[0])
+
+
+def fetch_kraken_price(client: httpx.Client, pair: str) -> float:
+    body = _get_json(client, KRAKEN_BASE, params={"pair": pair})
+    result = body.get("result") or {}
+    if not result:
+        raise RuntimeError(f"No Kraken data for {pair}")
+    ticker = next(iter(result.values()))
+    return float(ticker["c"][0])
+
+
+def fetch_coinbase_price(client: httpx.Client, product: str) -> float:
+    body = _get_json(client, f"{COINBASE_BASE}/{product}/spot")
+    data = body.get("data") or {}
+    if "amount" not in data:
+        raise RuntimeError(f"No Coinbase price for {product}")
+    return float(data["amount"])
+
+
+def fetch_exchange_spread_bps(client: httpx.Client, asset: str) -> float:
+    cfg = EXCHANGE_SPREAD_ASSETS[asset]
+    kraken_px = fetch_kraken_price(client, cfg["kraken"])
+    coinbase_px = fetch_coinbase_price(client, cfg["coinbase"])
+    mid = (kraken_px + coinbase_px) / 2
+    if mid == 0:
+        raise RuntimeError("exchange spread mid is zero")
+    return abs(kraken_px - coinbase_px) / mid * 10000
 
 
 def fetch_fred_fed_funds_changes(client: httpx.Client, api_key: str, *, since: str = "2021-01-01") -> list[dict[str, Any]]:
