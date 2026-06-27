@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -14,6 +14,7 @@ COINALYZE_BASE = "https://api.coinalyze.net/v1"
 FRED_BASE = "https://api.stlouisfed.org/fred"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 FEAR_GREED_BASE = "https://api.alternative.me/fng"
+FINRA_REGSHO_CDN = "https://cdn.finra.org/equity/regsho/daily"
 KRAKEN_BASE = "https://api.kraken.com/0/public/Ticker"
 COINBASE_BASE = "https://api.coinbase.com/v2/prices"
 
@@ -601,6 +602,64 @@ def fetch_binance_liquidation_hourly_buckets(
         else:
             bucket["short_usd"] += usd
     return [{"time": hour, **vals} for hour, vals in sorted(buckets.items())]
+
+
+def _parse_finra_regsho_day(text: str, symbol: str) -> tuple[float, float] | None:
+    """Return (total_shares, short_shares) for symbol from a FINRA Reg SHO daily file."""
+    total = 0.0
+    short = 0.0
+    found = False
+    for line in text.splitlines():
+        if not line or line.startswith("Date|"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 5 or parts[1] != symbol:
+            continue
+        short += float(parts[2])
+        total += float(parts[4])
+        found = True
+    if not found or total <= 0:
+        return None
+    return total, short
+
+
+def fetch_finra_dark_pool_history(
+    client: httpx.Client,
+    *,
+    since: datetime,
+    symbol: str = "SPY",
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+    """Daily SPY off-exchange proxy from FINRA Reg SHO files.
+
+    Returns:
+        volume_rows: (date, total share volume in millions)
+        pct_rows: (date, short volume % of total — DPI/DPL-style sentiment proxy)
+    """
+    start = since.date()
+    end = datetime.now(timezone.utc).date()
+    volume_rows: list[tuple[str, float]] = []
+    pct_rows: list[tuple[str, float]] = []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            ymd = day.strftime("%Y%m%d")
+            try:
+                resp = _request_with_retry(
+                    client,
+                    "GET",
+                    f"{FINRA_REGSHO_CDN}/CNMSshvol{ymd}.txt",
+                )
+                parsed = _parse_finra_regsho_day(resp.text, symbol)
+            except httpx.HTTPError:
+                parsed = None
+            if parsed:
+                total, short = parsed
+                iso = day.isoformat()
+                volume_rows.append((iso, total / 1_000_000))
+                pct_rows.append((iso, short / total * 100))
+            time.sleep(0.05)
+        day += timedelta(days=1)
+    return volume_rows, pct_rows
 
 
 def load_fred_api_key() -> str | None:

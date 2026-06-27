@@ -26,6 +26,7 @@ from market_memory.sources import (
     fetch_coinglass_hourly_liquidations,
     fetch_exchange_spread_bps,
     fetch_fear_greed_history,
+    fetch_finra_dark_pool_history,
     fetch_fred_cpi_yoy_series,
     fetch_fred_fed_funds_changes,
     fetch_fred_series,
@@ -39,7 +40,31 @@ from market_memory.sources import (
     load_fred_api_key,
 )
 
+_FINRA_DARK_POOL_CACHE: dict[str, tuple[list[tuple[str, float]], list[tuple[str, float]]]] = {}
+
 EXCHANGE_SPREAD_THRESHOLDS = {"BTC": 6.0, "ETH": 8.0, "SOL": 10.0}
+
+
+def _finra_dark_pool_rows(
+    client: httpx.Client,
+    spec: IndicatorSpec,
+    *,
+    since: datetime,
+) -> list[tuple[str, float]]:
+    symbol = spec.symbol or "SPY"
+    cache_key = f"{symbol}:{since.date().isoformat()}"
+    if cache_key not in _FINRA_DARK_POOL_CACHE:
+        _FINRA_DARK_POOL_CACHE[cache_key] = fetch_finra_dark_pool_history(
+            client,
+            since=since,
+            symbol=symbol,
+        )
+    volume_rows, pct_rows = _FINRA_DARK_POOL_CACHE[cache_key]
+    if spec.source == "finra_dark_pool_volume":
+        return volume_rows
+    if spec.source == "finra_dark_pool_pct":
+        return pct_rows
+    return []
 
 
 def _fetch_series_rows(
@@ -62,6 +87,8 @@ def _fetch_series_rows(
         return fetch_fred_cpi_yoy_series(client, fred_key, spec.series or "", since=since_date)
     if spec.source == "fear_greed":
         return fetch_fear_greed_history(client, since=since)
+    if spec.source in ("finra_dark_pool_volume", "finra_dark_pool_pct"):
+        return _finra_dark_pool_rows(client, spec, since=since)
     return []
 
 

@@ -33,6 +33,11 @@ class IndicatorSpec:
 YAHOO_INDICATORS: tuple[IndicatorSpec, ...] = (
     IndicatorSpec("sp500", "S&P 500", "yahoo", ("equities",), normal_alert=2.0, symbol="^GSPC", verify_series="SP500"),
     IndicatorSpec("nasdaq100", "NASDAQ 100", "yahoo", ("equities",), normal_alert=3.0, symbol="^NDX"),
+    IndicatorSpec("qqq", "QQQ ETF", "yahoo", ("equities", "etf"), normal_alert=2.5, symbol="QQQ"),
+    IndicatorSpec("bond_etf_agg", "iShares Aggregate Bond ETF", "yahoo", ("equities", "etf", "bonds"), normal_alert=0.5, symbol="AGG"),
+    IndicatorSpec("bond_etf_bnd", "Vanguard Total Bond ETF", "yahoo", ("equities", "etf", "bonds"), normal_alert=0.5, symbol="BND"),
+    IndicatorSpec("crypto_etf_ibit", "iShares Bitcoin ETF", "yahoo", ("crypto", "etf"), normal_alert=5.0, symbol="IBIT"),
+    IndicatorSpec("crypto_etf_fbtc", "Fidelity Bitcoin ETF", "yahoo", ("crypto", "etf"), normal_alert=5.0, symbol="FBTC"),
     IndicatorSpec("vix", "VIX", "yahoo", ("equities", "volatility"), normal_alert=15.0, symbol="^VIX", cross_rules=(
         CrossRule("crosses_above", 30.0),
         CrossRule("crosses_below", 15.0),
@@ -58,6 +63,10 @@ FRED_INDICATORS: tuple[IndicatorSpec, ...] = (
         CrossRule("crosses_above", 4.5),
         CrossRule("crosses_above", 5.0),
         CrossRule("crosses_below", 4.0),
+    )),
+    IndicatorSpec("treasury_2y", "2Y Treasury", "fred", ("macro", "rates"), alert_unit="absolute", normal_alert=0.08, series="DGS2", cross_rules=(
+        CrossRule("crosses_above", 4.0),
+        CrossRule("crosses_below", 3.5),
     )),
     IndicatorSpec("yield_curve", "Yield Curve", "fred", ("macro", "rates"), alert_unit="absolute", normal_alert=0.20, series="T10Y2Y", cross_rules=(
         CrossRule("crosses_below", 0.0),
@@ -89,6 +98,30 @@ SENTIMENT_INDICATORS: tuple[IndicatorSpec, ...] = (
     )),
 )
 
+FINRA_DARK_POOL_INDICATORS: tuple[IndicatorSpec, ...] = (
+    IndicatorSpec(
+        "dark_pool_volume",
+        "Dark Pool Volume (SPY)",
+        "finra_dark_pool_volume",
+        ("equities", "dark_pool"),
+        normal_alert=12.0,
+        symbol="SPY",
+    ),
+    IndicatorSpec(
+        "dark_pool_pct",
+        "Dark Pool Volume % (DPI/DPL proxy)",
+        "finra_dark_pool_pct",
+        ("equities", "dark_pool"),
+        alert_unit="absolute",
+        normal_alert=2.0,
+        symbol="SPY",
+        cross_rules=(
+            CrossRule("crosses_above", 50.0),
+            CrossRule("crosses_below", 40.0),
+        ),
+    ),
+)
+
 CRYPTO_DERIVATIVE_KEYS: tuple[str, ...] = (
     "btc_funding", "eth_funding", "sol_funding",
     "btc_basis", "eth_basis", "sol_basis",
@@ -96,7 +129,9 @@ CRYPTO_DERIVATIVE_KEYS: tuple[str, ...] = (
     "btc_liquidations", "eth_liquidations", "sol_liquidations",
 )
 
-ALL_SERIES_INDICATORS: tuple[IndicatorSpec, ...] = YAHOO_INDICATORS + FRED_INDICATORS + SENTIMENT_INDICATORS
+ALL_SERIES_INDICATORS: tuple[IndicatorSpec, ...] = (
+    YAHOO_INDICATORS + FRED_INDICATORS + SENTIMENT_INDICATORS + FINRA_DARK_POOL_INDICATORS
+)
 
 INDICATOR_BY_KEY: dict[str, IndicatorSpec] = {spec.key: spec for spec in ALL_SERIES_INDICATORS}
 
