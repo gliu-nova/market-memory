@@ -47,9 +47,18 @@ def main() -> None:
     prune.add_argument("--before", help="Delete events before ISO date")
     prune.add_argument("--keep-months", type=int, help="Keep only last N months")
 
-    backfill = sub.add_parser("backfill", help="Full backfill (default: replace all events)")
+    backfill = sub.add_parser("backfill", help="Full backfill (append by default; use --wipe to replace)")
     backfill.add_argument("--since", default="2021-01-01", help="ISO date lower bound")
-    backfill.add_argument("--no-wipe", action="store_true", help="Append instead of replacing all events")
+    backfill.add_argument(
+        "--wipe",
+        action="store_true",
+        help="Replace all events after a successful collection (refuses empty results)",
+    )
+    backfill.add_argument(
+        "--no-wipe",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     sync = sub.add_parser("sync", help="Incremental sync from free exchange APIs (for cron/poll)")
     sync.add_argument("--since", default="2021-01-01", help="ISO date lower bound for first run")
@@ -67,10 +76,11 @@ def main() -> None:
     if args.command == "backfill":
         from market_memory.backfill import backfill_database
 
+        wipe = bool(args.wipe) and not bool(args.no_wipe)
         report = backfill_database(
             data_dir=cfg.service.data_dir,
             since=datetime.fromisoformat(args.since),
-            wipe=not args.no_wipe,
+            wipe=wipe,
         )
         print(json.dumps(report, indent=2))
         return
@@ -87,6 +97,12 @@ def main() -> None:
         )
         print(json.dumps(report, indent=2))
         return
+
+    if args.command == "prune":
+        if args.before and args.keep_months:
+            parser.error("Use either --before or --keep-months")
+        if not args.before and not args.keep_months:
+            parser.error("Provide --before or --keep-months")
 
     db = EventDB(data_dir=cfg.service.data_dir)
 
@@ -116,14 +132,10 @@ def main() -> None:
                     )
                 )
             elif args.command == "prune":
-                if args.before and args.keep_months:
-                    parser.error("Use either --before or --keep-months")
                 if args.before:
                     deleted = db.prune_before(datetime.fromisoformat(args.before))
-                elif args.keep_months:
-                    deleted = db.prune_keep_months(args.keep_months)
                 else:
-                    parser.error("Provide --before or --keep-months")
+                    deleted = db.prune_keep_months(args.keep_months)
                 print(f"Deleted {deleted} events")
     finally:
         db.close()

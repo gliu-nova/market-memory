@@ -9,15 +9,13 @@ from market_memory.indicators import CrossRule, IndicatorSpec
 from market_memory.models import EventCreate
 
 
-def _pct_change(curr: float, prev: float) -> float | None:
+def pct_change(curr: float, prev: float) -> float | None:
     if prev == 0:
         return None
     return (curr - prev) / abs(prev) * 100
 
 
-def _direction_from_change(change: float, *, alert_unit: str) -> str:
-    if alert_unit == "percent":
-        return "up" if change > 0 else "down"
+def _direction_from_change(change: float) -> str:
     return "up" if change > 0 else "down"
 
 
@@ -80,14 +78,14 @@ def detect_series_events(
             )
         )
 
-    prev_day, prev_val = rows[0]
+    prev_val = rows[0][1]
     for day, val in rows[1:]:
-        change = val - prev_val if spec.alert_unit == "absolute" else _pct_change(val, prev_val)
+        change = val - prev_val if spec.alert_unit == "absolute" else pct_change(val, prev_val)
         if spec.detect_moves and change is not None and abs(change) >= spec.normal_alert:
             _emit(
                 day,
                 val,
-                direction=_direction_from_change(change, alert_unit=spec.alert_unit),
+                direction=_direction_from_change(change),
                 change=change,
                 trigger="move",
                 extra_meta={"prev_value": prev_val},
@@ -105,7 +103,7 @@ def detect_series_events(
                     extra_meta={"cross_level": rule.value, "prev_value": prev_val},
                 )
 
-        prev_day, prev_val = day, val
+        prev_val = val
 
     return events
 

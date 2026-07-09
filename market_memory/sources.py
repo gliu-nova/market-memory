@@ -41,17 +41,29 @@ def _ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+_RETRYABLE_STATUS = {429, 502, 503, 504}
+
+
 def _request_with_retry(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
     last: httpx.Response | None = None
+    last_exc: Exception | None = None
     for attempt in range(8):
-        resp = client.request(method, url, timeout=60.0, **kwargs)
+        try:
+            resp = client.request(method, url, timeout=60.0, **kwargs)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            time.sleep(min(2 ** attempt, 30))
+            continue
         last = resp
-        if resp.status_code != 429:
-            resp.raise_for_status()
-            return resp
-        time.sleep(min(2 ** attempt, 30))
+        if resp.status_code in _RETRYABLE_STATUS:
+            time.sleep(min(2 ** attempt, 30))
+            continue
+        resp.raise_for_status()
+        return resp
     if last is not None:
         last.raise_for_status()
+    if last_exc is not None:
+        raise last_exc
     raise RuntimeError(f"request failed for {url}")
 
 
@@ -111,6 +123,8 @@ def fetch_hl_funding_history(client: httpx.Client, asset: str, *, since_ms: int)
         batch = _post_json(client, HL_INFO, payload)
         if not batch:
             break
+        if not isinstance(batch, list):
+            raise RuntimeError(f"Hyperliquid fundingHistory error: {batch}")
         for row in batch:
             ts = int(row["time"])
             rows.append(
@@ -219,8 +233,8 @@ def fetch_coinglass_hourly_liquidations(
             url = f"{COINGLASS_BASE}/api/futures/liquidation/aggregated-history"
             params["exchange_list"] = "Binance,OKX,Bybit"
         body = _get_json(client, url, params=params, headers=headers)
-        if str(body.get("code")) != "0":
-            raise RuntimeError(f"Coinglass error ({exchange_scope}): {body.get('msg', body)}")
+        if not isinstance(body, dict) or str(body.get("code")) != "0":
+            raise RuntimeError(f"Coinglass error ({exchange_scope}): {body}")
         batch = body.get("data") or []
         if not batch:
             break
@@ -396,8 +410,8 @@ def fetch_fred_fed_funds_changes(client: httpx.Client, api_key: str, *, since: s
     return rows
 
 
-def load_coinalyze_api_key() -> str | None:
-    key = os.environ.get("COINALYZE_API_KEY", "").strip()
+def _load_env_key(name: str) -> str | None:
+    key = os.environ.get(name, "").strip()
     if key:
         return key
     for path in (
@@ -408,12 +422,23 @@ def load_coinalyze_api_key() -> str | None:
         if not path or not os.path.isfile(path):
             continue
         with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("COINALYZE_API_KEY="):
-                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if val:
-                        return val
+            for raw in handle:
+                line = raw.strip()
+                if line.startswith("export "):
+                    line = line[len("export ") :]
+                if not line.startswith(f"{name}="):
+                    continue
+                val = line.split("=", 1)[1].strip()
+                if " #" in val:
+                    val = val.split(" #", 1)[0].rstrip()
+                val = val.strip().strip('"').strip("'")
+                if val:
+                    return val
     return None
+
+
+def load_coinalyze_api_key() -> str | None:
+    return _load_env_key("COINALYZE_API_KEY")
 
 
 _coinalyze_markets_cache: list[dict[str, Any]] | None = None
@@ -506,23 +531,7 @@ def fetch_coinalyze_liquidation_hourly_buckets(
 
 
 def load_coinglass_api_key() -> str | None:
-    key = os.environ.get("COINGLASS_API_KEY", "").strip()
-    if key:
-        return key
-    for path in (
-        os.environ.get("TWITTER_BOT_ENV"),
-        os.path.expanduser("~/projects/twitter-bot/.env"),
-        os.path.join(os.getcwd(), ".env"),
-    ):
-        if not path or not os.path.isfile(path):
-            continue
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("COINGLASS_API_KEY="):
-                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if val:
-                        return val
-    return None
+    return _load_env_key("COINGLASS_API_KEY")
 
 
 def _hour_start_ms(ts_ms: int) -> int:
@@ -663,20 +672,4 @@ def fetch_finra_dark_pool_history(
 
 
 def load_fred_api_key() -> str | None:
-    key = os.environ.get("FRED_API_KEY", "").strip()
-    if key:
-        return key
-    for path in (
-        os.environ.get("TWITTER_BOT_ENV"),
-        os.path.expanduser("~/projects/twitter-bot/.env"),
-        os.path.join(os.getcwd(), ".env"),
-    ):
-        if not path or not os.path.isfile(path):
-            continue
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("FRED_API_KEY="):
-                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if val:
-                        return val
-    return None
+    return _load_env_key("FRED_API_KEY")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,20 @@ def _load_state(data_dir: str | Path) -> dict[str, Any]:
 def _save_state(data_dir: str | Path, state: dict[str, Any]) -> None:
     path = _state_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    payload = json.dumps(state, indent=2)
+    fd, tmp_name = tempfile.mkstemp(prefix=".sync_state_", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _parse_dt(raw: str | None) -> datetime | None:
@@ -69,29 +84,7 @@ def _db_watermark(
     indicator_type: str | None,
     event_type: str | None = None,
 ) -> datetime | None:
-    clauses: list[str] = []
-    params: list[Any] = []
-    if indicator_type:
-        clauses.append("indicator_type = ?")
-        params.append(indicator_type)
-    if asset:
-        clauses.append("asset = ?")
-        params.append(asset)
-    if event_type:
-        clauses.append("event_type = ?")
-        params.append(event_type)
-    if not clauses:
-        return None
-    row = db._conn.execute(
-        f"SELECT MAX(timestamp) FROM events WHERE {' AND '.join(clauses)}",
-        params,
-    ).fetchone()
-    if not row or row[0] is None:
-        return None
-    ts = row[0]
-    if isinstance(ts, datetime):
-        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    return datetime.fromisoformat(str(ts)).replace(tzinfo=timezone.utc)
+    return db.watermark(asset=asset, indicator_type=indicator_type, event_type=event_type)
 
 
 def _effective_since(
@@ -110,6 +103,24 @@ def _effective_since(
     return max(default, mark - OVERLAP)
 
 
+def _liquidation_warnings(liq_meta: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    mode = liq_meta.get("mode")
+    if mode == "coinglass_dual":
+        return warnings
+    if not liq_meta.get("coinalyze"):
+        warnings.append(
+            "No COINALYZE_API_KEY — liquidations use OKX/Binance hourly buckets only. "
+            "Add COINALYZE_API_KEY to twitter-bot/.env for cross-verified hourly history."
+        )
+    if not liq_meta.get("binance_available"):
+        warnings.append(
+            "Binance liquidation API unavailable from this network — using OKX hourly buckets only. "
+            "History builds forward from each sync (OKX exposes ~14h of fills per poll)."
+        )
+    return warnings
+
+
 def collect_incremental_events(
     db: Any,
     *,
@@ -121,15 +132,24 @@ def collect_incremental_events(
 
     events: list[EventCreate] = []
     with httpx.Client() as client:
-        deriv_since = _effective_since(db, asset="BTC", indicator_type="funding", default=since)
+        since_by_asset = {
+            asset: int(
+                _effective_since(db, asset=asset, indicator_type="funding", default=since).timestamp()
+                * 1000
+            )
+            for asset in ("BTC", "ETH", "SOL")
+        }
         deriv_events, deriv_report = collect_crypto_derivative_events(
             client,
-            since_ms=int(deriv_since.timestamp() * 1000),
+            since_ms_by_asset=since_by_asset,
         )
         events.extend(deriv_events)
         report["sources"].update(deriv_report)
 
-        liq_since = _effective_since(db, asset="BTC", indicator_type="liquidations", default=since)
+        liq_since = min(
+            _effective_since(db, asset=asset, indicator_type="liquidations", default=since)
+            for asset in ("BTC", "ETH", "SOL")
+        )
         liq_events, liq_meta = collect_liquidation_bundle(
             client,
             since=liq_since,
@@ -142,16 +162,7 @@ def collect_incremental_events(
         for key, val in liq_meta.items():
             if key in ("BTC", "ETH", "SOL"):
                 report["sources"][f"{key}_liquidations"] = val
-        if not liq_meta.get("coinalyze"):
-            report["warnings"].append(
-                "No COINALYZE_API_KEY — liquidations use OKX/Binance hourly buckets only. "
-                "Add COINALYZE_API_KEY to twitter-bot/.env for cross-verified hourly history."
-            )
-        if not liq_meta.get("binance_available"):
-            report["warnings"].append(
-                "Binance liquidation API unavailable from this network — using OKX hourly buckets only. "
-                "History builds forward from each sync (OKX exposes ~14h of fills per poll)."
-            )
+        report["warnings"].extend(_liquidation_warnings(liq_meta))
 
         fred_key = load_fred_api_key()
         if fred_key:

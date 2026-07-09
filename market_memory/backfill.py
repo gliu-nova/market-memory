@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import logging
 import statistics
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
+from market_memory.detectors import pct_change
 from market_memory.models import EventCreate
 from market_memory.sources import (
     ASSET_OKX,
+    _get_json,
+    _post_json,
     fetch_binance_liquidation_hourly_buckets,
     fetch_coinalyze_liquidation_hourly_buckets,
     fetch_okx_liquidation_hourly_buckets,
     load_coinalyze_api_key,
     load_coinglass_api_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 SINCE_DEFAULT = datetime(2021, 1, 1, tzinfo=timezone.utc)
@@ -47,12 +53,6 @@ def _percentile(values: list[float], pct: float) -> float:
     if lo == hi:
         return ordered[lo]
     return ordered[lo] + (k - lo) * (ordered[hi] - ordered[lo])
-
-
-def _pct_change(curr: float, prev: float) -> float | None:
-    if prev == 0:
-        return None
-    return (curr - prev) / abs(prev) * 100
 
 
 def _match_rate(rows: list[dict[str, Any]], ts: int, *, window_ms: int = 4 * 3600 * 1000) -> float | None:
@@ -110,27 +110,6 @@ def detect_funding_events(
             sources = ["okx"]
         else:
             continue
-        direction = None
-        if avg_rate >= p95:
-            direction = "extreme"
-        elif avg_rate <= p05:
-            direction = "extreme"
-        elif i > 0:
-            prev_row = primary[i - 1]
-            prev_okx = _match_rate(okx_rows, prev_row["time"])
-            prev_hl = _match_rate(hl_rows, prev_row["time"]) or prev_row["rate"]
-            prev_avg = None
-            if prev_okx is not None and prev_hl is not None and _rates_agree(prev_okx, prev_hl):
-                prev_avg = (prev_okx + prev_hl) / 2
-            elif prev_okx is None:
-                prev_avg = prev_hl
-            else:
-                prev_avg = prev_okx
-            swing = abs(avg_rate - (prev_avg if prev_avg is not None else avg_rate))
-            if med_change and swing >= 3 * med_change and abs(avg_rate) <= max(med_change * 2, 0.0001):
-                direction = "reset"
-        if not direction:
-            continue
         prev_avg = None
         if i > 0:
             prev_row = primary[i - 1]
@@ -142,6 +121,17 @@ def detect_funding_events(
                 prev_avg = prev_hl
             else:
                 prev_avg = prev_okx
+        direction = None
+        if avg_rate >= p95:
+            direction = "extreme"
+        elif avg_rate <= p05:
+            direction = "extreme"
+        elif i > 0:
+            swing = abs(avg_rate - (prev_avg if prev_avg is not None else avg_rate))
+            if med_change and swing >= 3 * med_change and abs(avg_rate) <= max(med_change * 2, 0.0001):
+                direction = "reset"
+        if not direction:
+            continue
         verified.append(
             (
                 row["time"],
@@ -173,7 +163,7 @@ def detect_funding_events(
                 indicator_type="funding",
                 timeframe="8h",
                 value=rate,
-                percent_change=_pct_change(rate, prev) if isinstance(prev, (int, float)) else None,
+                percent_change=pct_change(rate, prev) if isinstance(prev, (int, float)) else None,
                 direction=direction,
                 source="okx+hyperliquid",
                 tags=["crypto"],
@@ -238,7 +228,7 @@ def _liq_buckets_agree(okx_total: float, other_total: float | None) -> bool:
     if okx_total <= 0 or other_total <= 0:
         return False
     ratio = min(okx_total, other_total) / max(okx_total, other_total)
-    return ratio >= 0.15
+    return ratio >= 0.5
 
 
 def detect_multi_source_liquidation_events(
@@ -468,32 +458,41 @@ def verified_liquidation_fallback_events(
         asset = ep["asset"]
         swap = ASSET_OKX[asset]["swap"]
         try:
-            mark = client.get(
-                f"https://www.okx.com/api/v5/market/history-candles",
+            mark = _get_json(
+                client,
+                "https://www.okx.com/api/v5/market/history-candles",
                 params={"instId": swap, "bar": "1D", "after": str(ts), "limit": 2},
-                timeout=30,
-            ).json()
-            hl = client.post(
+            )
+            hl = _post_json(
+                client,
                 "https://api.hyperliquid.xyz/info",
-                json={
+                {
                     "type": "candleSnapshot",
                     "req": {"coin": asset, "interval": "1d", "startTime": ts, "endTime": ts + 86400000},
                 },
-                timeout=30,
-            ).json()
+            )
             okx_move = None
-            if mark.get("data"):
+            if isinstance(mark, dict) and mark.get("data"):
                 o, c = float(mark["data"][0][1]), float(mark["data"][0][4])
                 okx_move = (c - o) / o * 100 if o else 0
             hl_move = None
-            if hl:
+            if isinstance(hl, list) and hl:
                 o, c = float(hl[0]["o"]), float(hl[0]["c"])
                 hl_move = (c - o) / o * 100 if o else 0
             if okx_move is None or hl_move is None:
+                logger.warning("Skipping verified liquidation %s %s: missing price move", asset, day)
                 continue
             if not (okx_move <= -2.5 and hl_move <= -2.5):
+                logger.info(
+                    "Skipping verified liquidation %s %s: moves okx=%.2f hl=%.2f",
+                    asset,
+                    day,
+                    okx_move,
+                    hl_move,
+                )
                 continue
-        except Exception:
+        except (httpx.HTTPError, RuntimeError, OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+            logger.warning("Skipping verified liquidation %s %s: %s", asset, day, exc)
             continue
         events.append(
             EventCreate(
@@ -545,17 +544,21 @@ def backfill_database(
     data_dir: str = "data",
     *,
     since: datetime | None = None,
-    wipe: bool = True,
+    wipe: bool = False,
 ) -> dict[str, Any]:
     from market_memory.db import EventDB
 
     events, report = collect_real_events(since=since)
+    if wipe and not events:
+        raise RuntimeError("refusing wipe: collection returned 0 events")
     db = EventDB(data_dir=data_dir)
     try:
         if wipe:
-            db._conn.execute("DELETE FROM events")
-        ingested = db.ingest_events(events)
+            ingested = db.replace_all_events(events)
+        else:
+            ingested = db.ingest_events(events)
         report["ingested"] = ingested
+        report["wiped"] = wipe
         report["db_stats"] = db.stats().model_dump(mode="json")
     finally:
         db.close()

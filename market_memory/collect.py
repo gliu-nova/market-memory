@@ -109,7 +109,7 @@ def collect_series_indicator_events(
             continue
         try:
             rows = _fetch_series_rows(client, spec, since=since, fred_key=fred_key)
-        except Exception as exc:
+        except (httpx.HTTPError, RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
             report[spec.key] = {"error": str(exc), "events": 0}
             continue
         source = spec.source if spec.source != "fred_cpi_yoy" else "fred"
@@ -123,30 +123,40 @@ def collect_series_indicator_events(
 def collect_crypto_derivative_events(
     client: httpx.Client,
     *,
-    since_ms: int,
+    since_ms: int | None = None,
+    since_ms_by_asset: dict[str, int] | None = None,
 ) -> tuple[list[EventCreate], dict[str, Any]]:
     events: list[EventCreate] = []
     report: dict[str, Any] = {}
 
     for asset in ("BTC", "ETH", "SOL"):
-        okx_funding = fetch_okx_funding_history(client, asset, since_ms=since_ms)
-        hl_funding = fetch_hl_funding_history(client, asset, since_ms=since_ms)
+        asset_since = (
+            since_ms_by_asset[asset]
+            if since_ms_by_asset is not None and asset in since_ms_by_asset
+            else since_ms
+        )
+        if asset_since is None:
+            raise ValueError("since_ms or since_ms_by_asset is required")
+        okx_funding = fetch_okx_funding_history(client, asset, since_ms=asset_since)
+        hl_funding = fetch_hl_funding_history(client, asset, since_ms=asset_since)
         funding_events = detect_funding_events(asset, okx_funding, hl_funding)
         events.extend(funding_events)
         report[f"{asset}_funding"] = {
             "okx_points": len(okx_funding),
             "hl_points": len(hl_funding),
             "events": len(funding_events),
+            "since_ms": asset_since,
         }
 
-        okx_basis = fetch_okx_daily_basis(client, asset, since_ms=since_ms)
-        hl_basis = fetch_hl_daily_basis(client, asset, since_ms=since_ms)
+        okx_basis = fetch_okx_daily_basis(client, asset, since_ms=asset_since)
+        hl_basis = fetch_hl_daily_basis(client, asset, since_ms=asset_since)
         basis_events = detect_basis_events(asset, okx_basis, hl_basis)
         events.extend(basis_events)
         report[f"{asset}_basis"] = {
             "okx_points": len(okx_basis),
             "hl_points": len(hl_basis),
             "events": len(basis_events),
+            "since_ms": asset_since,
         }
 
     return events, report
@@ -162,7 +172,7 @@ def collect_exchange_spread_events(client: httpx.Client) -> tuple[list[EventCrea
             if event:
                 events.append(event)
             report[f"{asset}_exchange_spread"] = {"spread_bps": spread, "events": 1 if event else 0}
-        except Exception as exc:
+        except (httpx.HTTPError, RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
             report[f"{asset}_exchange_spread"] = {"error": str(exc), "events": 0}
     return events, report
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -33,17 +34,29 @@ CREATE INDEX IF NOT EXISTS idx_events_asset_indicator ON events(asset, indicator
 
 
 class EventDB:
-    """File-backed DuckDB event store for historical market context."""
+    """File-backed DuckDB event store for historical market context.
+
+    Timestamps are stored UTC-naive. Aware datetimes are converted to UTC;
+    naive datetimes are treated as already-UTC.
+    """
 
     def __init__(self, data_dir: str | Path = "data", db_name: str = "market_memory.duckdb") -> None:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / db_name
+        self._lock = threading.RLock()
         self._conn = duckdb.connect(str(self.db_path))
         self._conn.execute(_SCHEMA)
 
+    def __enter__(self) -> EventDB:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def ingest_events(self, events: list[EventCreate]) -> int:
         if not events:
@@ -65,6 +78,24 @@ class EventDB:
             )
             for event in events
         ]
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT OR REPLACE INTO events
+                (id, timestamp, event_type, asset, indicator_type, timeframe,
+                 value, percent_change, direction, source, tags, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def wipe(self) -> None:
+        """Delete all events. Prefer replace_all_events for safe rebuilds."""
+        with self._lock:
+            self._conn.execute("DELETE FROM events")
+
+    def _insert_rows(self, rows: list[tuple[Any, ...]]) -> None:
         self._conn.executemany(
             """
             INSERT OR REPLACE INTO events
@@ -74,7 +105,70 @@ class EventDB:
             """,
             rows,
         )
+
+    def replace_all_events(self, events: list[EventCreate]) -> int:
+        """Atomically replace all rows; rolls back if ingest fails."""
+        if not events:
+            raise ValueError("refusing to replace: empty event list")
+        rows = [
+            (
+                event.with_id().id,
+                _ensure_utc(event.timestamp),
+                event.event_type,
+                event.asset,
+                event.indicator_type,
+                event.timeframe,
+                event.value,
+                event.percent_change,
+                event.direction,
+                event.source,
+                json.dumps(event.tags),
+                json.dumps(event.metadata),
+            )
+            for event in events
+        ]
+        with self._lock:
+            self._conn.execute("BEGIN TRANSACTION")
+            try:
+                self._conn.execute("DELETE FROM events")
+                self._insert_rows(rows)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
         return len(rows)
+
+    def watermark(
+        self,
+        *,
+        asset: str | None = None,
+        indicator_type: str | None = None,
+        event_type: str | None = None,
+    ) -> datetime | None:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if indicator_type:
+            clauses.append("indicator_type = ?")
+            params.append(indicator_type)
+        if asset:
+            clauses.append("asset = ?")
+            params.append(asset)
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        if not clauses:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT MAX(timestamp) FROM events WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+        if not row or row[0] is None:
+            return None
+        ts = row[0]
+        if isinstance(ts, datetime):
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(str(ts)).replace(tzinfo=timezone.utc)
 
     def ingest_file(self, path: str | Path) -> int:
         return self.ingest_events(load_events_file(Path(path)))
@@ -104,8 +198,9 @@ class EventDB:
             LIMIT ? OFFSET ?
         """
         params.extend([limit, offset])
-        rows = self._conn.execute(sql, params).fetchall()
-        columns = [d[0] for d in self._conn.description]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            columns = [d[0] for d in self._conn.description]
         return [_row_to_event(dict(zip(columns, row))) for row in rows]
 
     def find_similar(self, query: SimilarityQuery, *, limit: int = 50) -> list[Event]:
@@ -117,13 +212,15 @@ class EventDB:
             LIMIT ?
         """
         params.append(limit)
-        rows = self._conn.execute(sql, params).fetchall()
-        columns = [d[0] for d in self._conn.description]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            columns = [d[0] for d in self._conn.description]
         return [_row_to_event(dict(zip(columns, row))) for row in rows]
 
     def count_similar(self, query: SimilarityQuery) -> int:
         where, params = _similarity_filters(query)
-        row = self._conn.execute(f"SELECT COUNT(*) FROM events {where}", params).fetchone()
+        with self._lock:
+            row = self._conn.execute(f"SELECT COUNT(*) FROM events {where}", params).fetchone()
         return int(row[0]) if row else 0
 
     def latest_similar(self, query: SimilarityQuery) -> Optional[Event]:
@@ -136,17 +233,18 @@ class EventDB:
         query: SimilarityQuery,
     ) -> Optional[float]:
         where, params = _similarity_filters(query)
-        row = self._conn.execute(
-            f"""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE value < ?) AS below
-            FROM events
-            {where}
-            AND value IS NOT NULL
-            """,
-            [current_value, *params],
-        ).fetchone()
+        where = _append_clause(where, "value IS NOT NULL")
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE value < ?) AS below
+                FROM events
+                {where}
+                """,
+                [current_value, *params],
+            ).fetchone()
         if not row or row[0] == 0:
             return None
         total, below = int(row[0]), int(row[1])
@@ -160,50 +258,52 @@ class EventDB:
         limit: int = 5,
     ) -> list[Event]:
         where, params = _similarity_filters(query)
+        where = _append_clause(where, "value IS NOT NULL")
         sql = f"""
             SELECT * FROM events
             {where}
-            AND value IS NOT NULL
             ORDER BY ABS(value - ?) ASC, timestamp DESC
             LIMIT ?
         """
         params = [*params, current_value, limit]
-        rows = self._conn.execute(sql, params).fetchall()
-        columns = [d[0] for d in self._conn.description]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            columns = [d[0] for d in self._conn.description]
         return [_row_to_event(dict(zip(columns, row))) for row in rows]
 
     def stats(self) -> EventStats:
-        total_row = self._conn.execute(
-            "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM events"
-        ).fetchone()
-        total = int(total_row[0]) if total_row else 0
-        earliest = total_row[1] if total_row and total_row[1] else None
-        latest = total_row[2] if total_row and total_row[2] else None
+        with self._lock:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM events"
+            ).fetchone()
+            total = int(total_row[0]) if total_row else 0
+            earliest = total_row[1] if total_row and total_row[1] else None
+            latest = total_row[2] if total_row and total_row[2] else None
 
-        by_type = {
-            row[0]: int(row[1])
-            for row in self._conn.execute(
-                "SELECT event_type, COUNT(*) FROM events GROUP BY event_type ORDER BY 2 DESC"
-            ).fetchall()
-        }
-        by_asset = {
-            row[0]: int(row[1])
-            for row in self._conn.execute(
-                "SELECT asset, COUNT(*) FROM events WHERE asset IS NOT NULL GROUP BY asset ORDER BY 2 DESC"
-            ).fetchall()
-        }
-        monthly = {
-            str(row[0]): int(row[1])
-            for row in self._conn.execute(
-                "SELECT strftime(timestamp, '%Y-%m'), COUNT(*) FROM events GROUP BY 1 ORDER BY 1"
-            ).fetchall()
-        }
-        yearly = {
-            str(row[0]): int(row[1])
-            for row in self._conn.execute(
-                "SELECT strftime(timestamp, '%Y'), COUNT(*) FROM events GROUP BY 1 ORDER BY 1"
-            ).fetchall()
-        }
+            by_type = {
+                row[0]: int(row[1])
+                for row in self._conn.execute(
+                    "SELECT event_type, COUNT(*) FROM events GROUP BY event_type ORDER BY 2 DESC"
+                ).fetchall()
+            }
+            by_asset = {
+                row[0]: int(row[1])
+                for row in self._conn.execute(
+                    "SELECT asset, COUNT(*) FROM events WHERE asset IS NOT NULL GROUP BY asset ORDER BY 2 DESC"
+                ).fetchall()
+            }
+            monthly = {
+                str(row[0]): int(row[1])
+                for row in self._conn.execute(
+                    "SELECT strftime(timestamp, '%Y-%m'), COUNT(*) FROM events GROUP BY 1 ORDER BY 1"
+                ).fetchall()
+            }
+            yearly = {
+                str(row[0]): int(row[1])
+                for row in self._conn.execute(
+                    "SELECT strftime(timestamp, '%Y'), COUNT(*) FROM events GROUP BY 1 ORDER BY 1"
+                ).fetchall()
+            }
         return EventStats(
             total_events=total,
             earliest=earliest,
@@ -216,26 +316,28 @@ class EventDB:
 
     def prune_before(self, cutoff: datetime) -> int:
         before = self.count_all()
-        self._conn.execute("DELETE FROM events WHERE timestamp < ?", [_ensure_utc(cutoff)])
+        with self._lock:
+            self._conn.execute("DELETE FROM events WHERE timestamp < ?", [_ensure_utc(cutoff)])
         return before - self.count_all()
 
     def prune_keep_months(self, months: int) -> int:
-        row = self._conn.execute(
-            """
-            SELECT COUNT(*) FROM events
-            WHERE timestamp < (SELECT MAX(timestamp) FROM events) - INTERVAL ? MONTH
-            """,
-            [months],
-        ).fetchone()
-        to_delete = int(row[0]) if row else 0
-        if to_delete:
-            self._conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 """
-                DELETE FROM events
+                SELECT COUNT(*) FROM events
                 WHERE timestamp < (SELECT MAX(timestamp) FROM events) - INTERVAL ? MONTH
                 """,
                 [months],
-            )
+            ).fetchone()
+            to_delete = int(row[0]) if row else 0
+            if to_delete:
+                self._conn.execute(
+                    """
+                    DELETE FROM events
+                    WHERE timestamp < (SELECT MAX(timestamp) FROM events) - INTERVAL ? MONTH
+                    """,
+                    [months],
+                )
         return to_delete
 
     def tweet_context(
@@ -279,14 +381,22 @@ class EventDB:
         }
 
     def count_all(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM events").fetchone()
         return int(row[0]) if row else 0
 
 
 def _ensure_utc(ts: datetime) -> datetime:
+    """Normalize to UTC-naive. Naive inputs are assumed to already be UTC."""
     if ts.tzinfo is None:
         return ts
     return ts.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _append_clause(where: str, clause: str) -> str:
+    if where:
+        return f"{where} AND {clause}"
+    return f"WHERE {clause}"
 
 
 def _row_to_event(row: dict[str, Any]) -> Event:

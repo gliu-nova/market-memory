@@ -19,7 +19,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Load sample data
-python -m market_memory.cli ingest data/sample_events.json
+python -m market_memory.cli ingest tests/fixtures/sample_events.json
 
 # Query from CLI
 python -m market_memory.cli count \
