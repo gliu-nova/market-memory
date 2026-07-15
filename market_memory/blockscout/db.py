@@ -253,9 +253,9 @@ def _addr_field(obj: Any, *keys: str) -> str | None:
         for k in keys:
             if k in obj and obj[k]:
                 return str(obj[k]).lower()
-        h = obj.get("hash")
-        if h:
-            return str(h).lower()
+        for k in ("hash", "address", "address_hash"):
+            if obj.get(k):
+                return str(obj[k]).lower()
     return None
 
 
@@ -646,14 +646,19 @@ class BlockscoutDB:
         payload = []
         for r in rows:
             token = r.get("token") if isinstance(r.get("token"), dict) else {}
-            token_addr = _addr_field(token, "address", "hash")
+            token_addr = _addr_field(token, "address_hash", "address", "hash")
             if not token_addr:
                 continue
             value = r.get("value")
+            decimals = token.get("decimals")
+            val_norm = None
             try:
-                val_norm = float(r["value"]) if r.get("token_instance") else _wei_to_eth(value)
-            except (TypeError, ValueError):
-                val_norm = _wei_to_eth(value)
+                if value is not None and decimals not in (None, ""):
+                    val_norm = int(value) / (10 ** int(decimals))
+                elif value is not None:
+                    val_norm = _wei_to_eth(value)
+            except (TypeError, ValueError, OverflowError):
+                val_norm = None
             payload.append(
                 (
                     owner,
@@ -909,6 +914,7 @@ class BlockscoutDB:
             "addresses": _c("addresses"),
             "transactions": _c("transactions"),
             "token_transfers": _c("token_transfers"),
+            "token_balances": _c("token_balances"),
             "blocks": _c("blocks"),
             "tokens": _c("tokens"),
             "token_holders": _c("token_holders"),
