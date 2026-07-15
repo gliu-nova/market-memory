@@ -161,6 +161,63 @@ for r in results:
 
 SQLite defaults to `data/etherscan.db` (multi-chain PKs on `tx_hash+chain_id`; tables include `whale_alerts`).
 
+## Blockscout on-chain ingestion
+
+Blockscout API v2 (+ Pro key) pipeline for accounts, txs/blocks, tokens/holders, contracts, and network stats. Stores in `data/blockscout.db` with whale alerts and heuristic high-EV trader scores.
+
+### Setup
+
+```bash
+# .env
+BLOCKSCOUT_API_KEY=your_pro_key
+BLOCKSCOUT_INSTANCE=ethereum   # or base, optimism, arbitrum, polygon, gnosis
+```
+
+### CLI examples
+
+```bash
+# Network stats
+python ingest_blockscout.py --mode stats --json
+
+# Watched account (meta + txs + tokens + contract attempt + trader score + whales)
+python ingest_blockscout.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --mode account --role whale --analyze
+
+# Watchlist batch
+python ingest_blockscout.py --watchlist data/watchlist.yaml --mode account
+
+# Token holders
+python ingest_blockscout.py --mode token --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+
+# Recent blocks + network feed
+python ingest_blockscout.py --mode network
+
+# List instances
+python -m market_memory.blockscout --list-instances
+```
+
+### Modules covered
+
+| Area | Endpoints / tables |
+|------|--------------------|
+| Addresses / whales / monitoring | `addresses`, `address_counters`, roles `whale\|trader\|monitor` |
+| High-EV traders | `trader_scores` (success rate, volume, activity, counterparties) |
+| Transactions & blocks | `transactions`, `blocks` |
+| Tokens & holders | `tokens`, `token_holders`, `token_balances`, `token_transfers` |
+| Contracts & verification | `contracts` (ABI/source when verified) |
+| Stats | `network_stats` |
+
+### Library API
+
+```python
+from market_memory.blockscout import load_blockscout_config, run_ingest, BlockscoutDB
+
+cfg = load_blockscout_config()
+result = run_ingest(address="0xd8dA...", mode="account", role="whale", config=cfg)
+with BlockscoutDB(cfg.db_path) as db:
+    print(db.stats())
+    print(db.fetch_high_ev_traders(min_score=70))
+```
+
 ### twitter-bot integration status
 
 | Surface | Status |
