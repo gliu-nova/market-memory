@@ -90,6 +90,86 @@ direction=spike&since=2021-01-01&current_value=461800000"
 
 See `examples/bot_integration.py`.
 
+## Etherscan on-chain ingestion
+
+Multi-chain-ready pipeline (Etherscan API v2). Fetches account txs, token transfers, balances, gas oracle, and contract metadata into SQLite with idempotent inserts, free-tier throttling, whale-alert hooks, watchlists, and a Streamlit dashboard.
+
+### Setup
+
+```bash
+cp .env.example .env
+# Edit .env and set ETHERSCAN_API_KEY=...
+
+pip install -e ".[dev]"
+# optional:
+# pip install -e ".[scheduler]"      # APScheduler
+# pip install -e ".[dashboard]"      # Streamlit
+# pip install -e ".[watchlist-yaml]" # YAML watchlists
+# pip install -e ".[all]"
+```
+
+### CLI examples
+
+```bash
+# Recent txs + token transfers + balance + gas for an address
+python ingest.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --mode recent
+
+# Multi-address watchlist (YAML / JSON / TXT) + whale alerts
+cp data/watchlist.example.yaml data/watchlist.yaml
+python ingest.py --watchlist data/watchlist.yaml --mode recent --whale-alerts
+
+# Specific chain (name or id)
+python ingest.py --address 0x... --chain base --mode recent
+python ingest.py --list-chains
+
+# Analyze after ingest
+python -m market_memory.etherscan --watchlist data/watchlist.yaml --analyze
+
+# Continuous polling with whales
+python ingest.py --watchlist data/watchlist.yaml --schedule-loop --interval 120 --whale-alerts
+
+# Streamlit dashboard over data/etherscan.db
+streamlit run market_memory/etherscan/dashboard.py
+# or: python -m market_memory.etherscan.dashboard
+
+# Tweet-ready whale drafts (example bridge for twitter-bot)
+python examples/whale_alert_bridge.py --watchlist data/watchlist.yaml
+```
+
+### Library API
+
+```python
+from market_memory.etherscan import (
+    load_etherscan_config,
+    load_watchlist,
+    run_ingest,
+    run_ingest_entries,
+    EtherscanDB,
+    detect_large_transfers,
+    format_whale_tweet,
+    check_whale_alerts,
+)
+
+cfg = load_etherscan_config()
+wl = load_watchlist("data/watchlist.yaml")
+results = run_ingest_entries(wl.entries, mode="recent", whale_alerts=True, config=cfg)
+
+for r in results:
+    for raw in r.whale_alerts:
+        print(raw["value_eth"], raw["tx_hash"])
+```
+
+SQLite defaults to `data/etherscan.db` (multi-chain PKs on `tx_hash+chain_id`; tables include `whale_alerts`).
+
+### twitter-bot integration status
+
+| Surface | Status |
+|---------|--------|
+| **DuckDB EventDB** (historical tweet context, sync, record posted alerts) | **Integrated** via `twitter-bot/src/market_memory_bridge.py` |
+| **Etherscan on-chain pipeline** (SQLite, whales, watchlist) | **Not wired into twitter-bot yet** — importable API + `examples/whale_alert_bridge.py` ready for you to hook |
+
+The bot today uses market-memory for *indicator history / rarity context*, not on-chain whale monitoring. To post whales, call `run_ingest(..., whale_alerts=True)` or `format_whale_tweet` from a bot job (see the example script).
+
 ## Tests
 
 ```bash

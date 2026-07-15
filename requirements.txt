@@ -4,3 +4,10 @@ pydantic>=2.9.0
 duckdb>=1.1.0
 pytest>=8.3.0
 httpx>=0.27.0
+requests>=2.32.0
+python-dotenv>=1.0.0
+pandas>=2.2.0
+# optional extras:
+#   pip install apscheduler          # --schedule-apscheduler
+#   pip install streamlit            # dashboard
+#   pip install pyyaml               # YAML watchlists

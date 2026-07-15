@@ -1,0 +1,20 @@
+# Copy to data/watchlist.yaml and edit.
+# Load with: python ingest.py --watchlist data/watchlist.yaml --mode recent --whale-alerts
+
+defaults:
+  chain: ethereum          # name or numeric chain id (see --list-chains)
+  mode: recent
+  large_transfer_eth: 100  # per-entry override supported
+  include_tokens: true
+  include_balance: true
+
+addresses:
+  # Vitalik (example) — Ethereum mainnet
+  - address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+    label: vitalik
+
+  # Same address on another chain (illustrative — not all EOAs are active everywhere)
+  # - address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+  #   label: vitalik-base
+  #   chain: base
+  #   large_transfer_eth: 50

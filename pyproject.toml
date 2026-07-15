@@ -13,10 +13,21 @@ dependencies = [
     "pydantic>=2.9.0",
     "duckdb>=1.1.0",
     "httpx>=0.27.0",
+    "requests>=2.32.0",
+    "python-dotenv>=1.0.0",
+    "pandas>=2.2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3.0"]
+scheduler = ["apscheduler>=3.10.0"]
+dashboard = ["streamlit>=1.32.0"]
+watchlist-yaml = ["pyyaml>=6.0"]
+all = [
+    "apscheduler>=3.10.0",
+    "streamlit>=1.32.0",
+    "pyyaml>=6.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["market_memory*"]
