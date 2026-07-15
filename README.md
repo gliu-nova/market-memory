@@ -166,9 +166,9 @@ SQLite defaults to `data/etherscan.db` (multi-chain PKs on `tx_hash+chain_id`; t
 | Surface | Status |
 |---------|--------|
 | **DuckDB EventDB** (historical tweet context, sync, record posted alerts) | **Integrated** via `twitter-bot/src/market_memory_bridge.py` |
-| **Etherscan on-chain pipeline** (SQLite, whales, watchlist) | **Not wired into twitter-bot yet** — importable API + `examples/whale_alert_bridge.py` ready for you to hook |
+| **Etherscan on-chain pipeline** (SQLite, whales, watchlist) | **Integrated** via `twitter-bot/src/etherscan_bridge.py` |
 
-The bot today uses market-memory for *indicator history / rarity context*, not on-chain whale monitoring. To post whales, call `run_ingest(..., whale_alerts=True)` or `format_whale_tweet` from a bot job (see the example script).
+The bot poll cycle runs `process_etherscan_for_bot`: ingest watchlist → whale hook → enqueue `eth_whale` → posting engine compose/tweet. Configure under `twitter-bot/config.yaml` → `etherscan:` and `ETHERSCAN_API_KEY`. See twitter-bot README “On-chain whales”.
 
 ## Tests
 
