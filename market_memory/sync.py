@@ -111,7 +111,7 @@ def _liquidation_warnings(liq_meta: dict[str, Any]) -> list[str]:
     if not liq_meta.get("coinalyze"):
         warnings.append(
             "No COINALYZE_API_KEY — liquidations use OKX/Binance hourly buckets only. "
-            "Add COINALYZE_API_KEY to twitter-bot/.env for cross-verified hourly history."
+            "Add COINALYZE_API_KEY to Cross-Asset-Signal-Engine/.env for cross-verified hourly history."
         )
     if not liq_meta.get("binance_available"):
         warnings.append(

@@ -416,7 +416,7 @@ def _load_env_key(name: str) -> str | None:
         return key
     for path in (
         os.environ.get("TWITTER_BOT_ENV"),
-        os.path.expanduser("~/projects/twitter-bot/.env"),
+        os.path.expanduser("~/projects/Cross-Asset-Signal-Engine/.env"),
         os.path.join(os.getcwd(), ".env"),
     ):
         if not path or not os.path.isfile(path):
